@@ -8,9 +8,9 @@ import (
 func showSpread(m interface{}) {
 	// dataOffset is where the cell data begins in a bmap
 	const dataOffset = unsafe.Offsetof(struct {
-		tophash [bucketCnt]uint8
-		cells   int64
-	}{}.cells)
+		b bmap
+		v int64
+	}{}.v)
 
 	t, h := mapTypeAndValue(m)
 
@@ -135,6 +135,7 @@ type maptype struct {
 	key        *_type
 	elem       *_type
 	bucket     *_type // internal type representing a hash bucket
+	hasher     func(unsafe.Pointer, uintptr) uintptr
 	keysize    uint8  // size of key slot
 	elemsize   uint8  // size of elem slot
 	bucketsize uint16 // size of bucket

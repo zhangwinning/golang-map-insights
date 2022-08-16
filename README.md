@@ -17,7 +17,7 @@ docker run --rm -it -v $(pwd):/app golang:1.13.10 go run /app/grow.go
 ```
 
 ```
-docker run --rm -it -v $(pwd):/app golang:1.13.10 go run /app/spread.go
+docker run --rm -it -v $(pwd):/app golang:1.19 go run /app/spread.go
 ```
 
 ```
