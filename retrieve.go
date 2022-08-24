@@ -5,83 +5,36 @@ import (
 	"unsafe"
 )
 
-func showSpread(m interface{}) {
-	// dataOffset is where the cell data begins in a bmap
-	const dataOffset = unsafe.Offsetof(struct {
-		b bmap
-		v int64
-	}{}.v)
+const (
+	// Maximum number of key/elem pairs a bucket can hold.
+	bucketCntBits = 3
+	bucketCnt     = 1 << bucketCntBits
+)
 
-	t, h := mapTypeAndValue(m)
-
-	fmt.Printf("Overflow buckets: %d", h.noverflow)
-
-	numBuckets := 1 << h.B
-
-	for r := 0; r < numBuckets*bucketCnt; r++ {
-		bucketIndex := r / bucketCnt
-		cellIndex := r % bucketCnt
-
-		if cellIndex == 0 {
-			fmt.Printf("\nBucket %3d:", bucketIndex)
-		}
-
-		// lookup cell
-		b := (*bmap)(add(h.buckets, uintptr(bucketIndex)*uintptr(t.bucketsize)))
-		if b.tophash[cellIndex] == 0 {
-			// cell is empty
-			continue
-		}
-
-		k := add(unsafe.Pointer(b), dataOffset+uintptr(cellIndex)*uintptr(t.keysize))
-
-		ei := emptyInterface{
-			_type: unsafe.Pointer(t.key),
-			value: k,
-		}
-		key := *(*interface{})(unsafe.Pointer(&ei))
-		fmt.Printf(" %3d", key.(int))
-	}
-	fmt.Printf("\n\n")
+// A bucket for a Go map.
+type bmap struct {
+	// tophash generally contains the top byte of the hash value
+	// for each key in this bucket. If tophash[0] < minTopHash,
+	// tophash[0] is a bucket evacuation state instead.
+	tophash [bucketCnt]uint8
+	// Followed by bucketCnt keys and then bucketCnt elems.
+	// NOTE: packing all the keys together and then all the elems together makes the
+	// code a bit more complicated than alternating key/elem/key/elem/... but it allows
+	// us to eliminate padding which would be needed for, e.g., map[int64]int8.
+	// Followed by an overflow pointer.
 }
 
-func main() {
-	m := make(map[int]int)
-
-	for i := 0; i < 500; i++ {
-		m[i] = i * 3
-	}
-
-	showSpread(m)
-
-	m = make(map[int]int)
-
-	for i := 0; i < 8; i++ {
-		m[i] = i * 3
-	}
-
-	showSpread(m)
+// Should be a built-in for unsafe.Pointer?
+//
+//go:nosplit
+func add(p unsafe.Pointer, x uintptr) unsafe.Pointer {
+	return unsafe.Pointer(uintptr(p) + x)
 }
 
 type emptyInterface struct {
 	_type unsafe.Pointer
 	value unsafe.Pointer
 }
-
-func mapTypeAndValue(m interface{}) (*maptype, *hmap) {
-	ei := (*emptyInterface)(unsafe.Pointer(&m))
-	return (*maptype)(ei._type), (*hmap)(ei.value)
-}
-
-func add(p unsafe.Pointer, x uintptr) unsafe.Pointer {
-	return unsafe.Pointer(uintptr(p) + x)
-}
-
-const (
-	// Maximum number of key/elem pairs a bucket can hold.
-	bucketCntBits = 3
-	bucketCnt     = 1 << bucketCntBits
-)
 
 // A header for a Go map.
 type hmap struct {
@@ -117,17 +70,9 @@ type mapextra struct {
 	nextOverflow *bmap
 }
 
-// A bucket for a Go map.
-type bmap struct {
-	// tophash generally contains the top byte of the hash value
-	// for each key in this bucket. If tophash[0] < minTopHash,
-	// tophash[0] is a bucket evacuation state instead.
-	tophash [bucketCnt]uint8
-	// Followed by bucketCnt keys and then bucketCnt elems.
-	// NOTE: packing all the keys together and then all the elems together makes the
-	// code a bit more complicated than alternating key/elem/key/elem/... but it allows
-	// us to eliminate padding which would be needed for, e.g., map[int64]int8.
-	// Followed by an overflow pointer.
+func mapTypeAndValue(m interface{}) (*maptype, *hmap) {
+	ei := (*emptyInterface)(unsafe.Pointer(&m))
+	return (*maptype)(ei._type), (*hmap)(ei.value)
 }
 
 type maptype struct {
@@ -156,7 +101,6 @@ type typeAlg struct {
 type tflag uint8
 type nameOff int32
 type typeOff int32
-
 type _type struct {
 	size       uintptr
 	ptrdata    uintptr // size of memory prefix holding all pointers
@@ -173,3 +117,74 @@ type _type struct {
 	str       nameOff
 	ptrToThis typeOff
 }
+
+const PtrSize = 4 << (^uintptr(0) >> 63)
+
+// bucketShift returns 1<<b, optimized for code generation.
+func bucketShift(b uint8) uintptr {
+	// Masking the shift amount allows overflow checks to be elided.
+	return uintptr(1) << (b & (PtrSize*8 - 1))
+}
+
+var (
+	// data offset should be the size of the bmap struct, but needs to be
+	// aligned correctly. For amd64p32 this means 64-bit alignment
+	// even though pointers are 32 bit.
+	dataOffset = unsafe.Offsetof(struct {
+		b bmap
+		v int64
+	}{}.v)
+)
+
+func noescape(p unsafe.Pointer) unsafe.Pointer {
+	x := uintptr(p)
+	return unsafe.Pointer(x ^ 0)
+}
+
+//var (
+//	dataOffset = 8
+//)
+
+func (b *bmap) keys() unsafe.Pointer {
+	return add(unsafe.Pointer(b), uintptr(dataOffset))
+}
+
+// bucketMask returns 1<<b - 1, optimized for code generation.
+func bucketMask(b uint8) uintptr {
+	return bucketShift(b) - 1
+}
+
+func (b *bmap) overflow(t *maptype) *bmap {
+	return *(**bmap)(add(unsafe.Pointer(b), uintptr(t.bucketsize)-PtrSize))
+}
+
+// isEmpty reports whether the given tophash array entry represents an empty bucket entry.
+func isEmpty(x uint8) bool {
+	return x <= 1
+}
+
+func main() {
+	abc := make(map[int]int, 100)
+	for i := 0; i < 100; i++ {
+		abc[i] = i * i
+	}
+
+	t, h := mapTypeAndValue(abc)
+
+	// 查找 value 的过程
+	key := 40
+	hash := t.hasher(noescape(unsafe.Pointer(&key)), uintptr(h.hash0))
+
+	m := bucketMask(h.B)
+	var b *bmap
+	b = (*bmap)(add(h.buckets, (hash&m)*uintptr(t.bucketsize)))
+	for ; b != nil; b = b.overflow(t) { // 这段代码可以去掉，虽然不知道是什么作用
+		for i, k := uintptr(0), b.keys(); i < bucketCnt; i, k = i+1, add(k, 8) {
+			if *(*uint64)(k) == uint64(key) && !isEmpty(b.tophash[i]) {
+				value := add(unsafe.Pointer(b), dataOffset+bucketCnt*8+i*uintptr(t.elemsize))
+				fmt.Println(value, *(*uint64)(value))
+			}
+		}
+	}
+}
+
