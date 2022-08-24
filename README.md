@@ -9,6 +9,10 @@ That's why this code works only on a limited number of Golang versions.
 The easiest way to run them is with Docker:
 
 ```
+docker run --rm -it -v $(pwd):/app golang:1.19 go run /app/retrieve.go
+```
+
+```
 docker run --rm -it -v $(pwd):/app golang:1.13.10 go run /app/random.go
 ```
 
